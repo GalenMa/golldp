@@ -13,6 +13,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"regexp"
 	"runtime"
 	"strings"
 
@@ -28,7 +29,7 @@ var (
 	err         error
 	timeout    	int
 	cachealive int
-
+	bService		bool
 	handle      *pcap.Handle
 )
 
@@ -36,11 +37,11 @@ const (
 	cachepathformat string = "/tmp/%slldp.pcap"
 )
 
-func exit_timeout(sub int){
+func exit_timeout(sub int,  handle *pcap.Handle ){
 	t := time.NewTimer(time.Duration(sub) * time.Second)
 	<-t.C
-	fmt.Println("time out")
-	os.Exit(1)
+	log.Debug("time out, close handle")
+	handle.Close()
 }
 
 func getIfLinkstate(ifi *net.Interface) bool {
@@ -74,6 +75,7 @@ func main() {
 	flag.IntVar(&tlvid, "V", 0, "TLV identifier")
 	flag.IntVar(&timeout, "W", 60, "wait for  time out (s)")
 	flag.IntVar(&cachealive, "a", 120, "cache alive time (s)")
+	flag.BoolVar(&bService, "s", false, "run as service")
 
 	flag.Parse()
 	if debug{
@@ -85,48 +87,77 @@ func main() {
 
 	initlog(logfile, debug)
 
-	go exit_timeout(timeout)
-	ifi, err := net.InterfaceByName(device)
-	if err != nil {
-		fmt.Printf("%v open interface failed\n", device)
-		os.Exit(1)
+	if bService {
+		StartService()
+	} else {
+		ifi, err := net.InterfaceByName(device)
+		if err != nil {
+			fmt.Printf("%v open interface failed\n", device)
+			os.Exit(1)
+		}
+		log.Debugf("device info %v", *ifi)
+		if err := getLLDPInfo(ifi); err != nil {
+			fmt.Println(err.Error())
+			os.Exit(1)
+		}
 	}
-	log.Debugf("device info %v", *ifi)
-	//log.Debugf("flag:%x\nIFF_LOWER_UP:%x\n", ifi.Flags , unix.IFF_LOWER_UP)
-	//
-	//log.Debugf("%x\n", ifi.Flags & unix.IFF_LOWER_UP)
+}
+
+func getAllInterfacesLLDPInfo(){
+	log.Debug("start get lldp info")
+	inters, err := net.Interfaces()
+	if err != nil {
+		log.Errorf("get interfaces failed. err.:%v", err)
+		return
+	}
+
+	for {
+		for _, in := range inters {
+			if in.Flags&net.FlagUp != 1 || in.Flags&net.FlagLoopback == 1 {
+				continue
+			}
+
+			if r, _ := regexp.Compile("^em|^eth|^ens|^eno|^p"); r.MatchString(in.Name) == false {
+				continue
+			}
+			if err := getLLDPInfo(&in); err != nil {
+				log.Errorf("get lldp info failed. err:%v", err)
+			}
+		}
+
+		ticker := time.Tick(time.Minute)
+		<- ticker
+	}
+}
+
+func getLLDPInfo(ifi *net.Interface) error {
 	if getIfLinkstate(ifi) == false {
-		fmt.Printf("%s is down\n", device)
-		os.Exit(1)
+		return fmt.Errorf("%s is down\n", ifi.Name)
 	}
 
 	if printPacketInfoFromCache(ifi, tlvid) {
-		return
+		return nil
 	}
 
 	//start := time.Now()
 	// Open device
-	handle, err = pcap.OpenLive(device, int32(ifi.MTU), promiscuous, 5 * time.Second)
+	handle, err = pcap.OpenLive(ifi.Name, int32(ifi.MTU), promiscuous, 50 * time.Millisecond)
 	if err != nil {
 		log.Debugf("OpenLive oerr: %v", err)
-		fmt.Printf("open live %v interface failed", device)
-		os.Exit(1)
+		return fmt.Errorf("open live %v interface failed", ifi.Name)
 	}
 	defer handle.Close()
+	go exit_timeout(timeout, handle)
 
 	packetSource := gopacket.NewPacketSource(handle, handle.LinkType())
 	for packet := range packetSource.Packets() {
 		if res := printPacketInfo(ifi, packet, tlvid); res {
-			return
+			return nil
 		}
-
-		//if time.Now().After(start.Add(time.Duration(timeout)* time.Second)) {
-		//	fmt.Println("get lldp package timeout")
-		//	os.Exit(1)
-		//}
 	}
-}
 
+	return fmt.Errorf("%s time out", ifi.Name)
+}
 
 func initlog(logFile string, debug bool) {
 	log.SetFormatter(&nested.Formatter{
@@ -187,10 +218,10 @@ func initlog(logFile string, debug bool) {
 func readLinkLayerDiscoverypacket(ifi *net.Interface, packet gopacket.Packet, tlvid int) bool {
 	discoveryLayer := packet.Layer(layers.LayerTypeLinkLayerDiscovery)
 	discoveryPacket, _ := discoveryLayer.(*layers.LinkLayerDiscovery)
-	log.Debug(discoveryPacket)
+	log.Debugf("discoveryPacket: %v", discoveryPacket)
 	discoveryInfoLayer := packet.Layer(layers.LayerTypeLinkLayerDiscoveryInfo)
 	discoveryInfoPacket, _ := discoveryInfoLayer.(*layers.LinkLayerDiscoveryInfo)
-	log.Debug(discoveryInfoPacket)
+	//log.Debugf("discoveryInfoPacket: %v", discoveryInfoPacket)
 
 	if ifi.HardwareAddr.String() == net.HardwareAddr(discoveryPacket.ChassisID.ID).String(){
 		log.Debug("local lldp packet")
@@ -201,7 +232,7 @@ func readLinkLayerDiscoverypacket(ifi *net.Interface, packet gopacket.Packet, tl
 		for i := int(layers.LLDPTLVChassisID); i <= int(layers.LLDPTLVMgmtAddress); i++{
 			printTLV(discoveryPacket, discoveryInfoPacket, i)
 		}
-		fmt.Println("End of LLDPDU TLV")
+		fmt.Printf("End of LLDPDU TLV\n")
 	} else {
 		printTLV(discoveryPacket, discoveryInfoPacket, tlvid)
 	}
@@ -220,6 +251,7 @@ func printTLV(discoveryPacket *layers.LinkLayerDiscovery, discoveryInfoPacket *l
 	case layers.LLDPTLVTTL:
 		fmt.Printf("Time to Live TLV\n")
 		fmt.Printf("\t%v\n", discoveryPacket.TTL)
+	case layers.LLDPTLVPortDescription:
 	case layers.LLDPTLVSysName:
 		fmt.Printf("System Name TLV\n")
 		fmt.Printf("\t%s\n", discoveryInfoPacket.SysName)
@@ -314,11 +346,6 @@ func printPacketInfoFromCache(ifi *net.Interface, tlvid int) bool {
 		if res := readLinkLayerDiscoverypacket(ifi, packet, tlvid); res {
 			return true
 		}
-
-		//if time.Now().After(start.Add(time.Duration(timeout)* time.Second)) {
-		//	fmt.Println("get lldp package from cache timeout")
-		//	return  false
-		//}
 	}
 
 	return false
