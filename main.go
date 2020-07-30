@@ -87,7 +87,10 @@ func main() {
 
 	initlog(logfile, debug)
 
+
 	if bService {
+		waitForNetwork()
+
 		StartService()
 	} else {
 		ifi, err := net.InterfaceByName(device)
@@ -104,14 +107,15 @@ func main() {
 }
 
 func getAllInterfacesLLDPInfo(){
-	log.Debug("start get lldp info")
-	inters, err := net.Interfaces()
-	if err != nil {
-		log.Errorf("get interfaces failed. err.:%v", err)
-		return
-	}
 
 	for {
+		log.Debug("start get lldp info")
+		inters, err := net.Interfaces()
+		if err != nil {
+			log.Errorf("get interfaces failed. err.:%v", err)
+			return
+		}
+
 		for _, in := range inters {
 			if in.Flags&net.FlagUp != 1 || in.Flags&net.FlagLoopback == 1 {
 				continue
@@ -283,7 +287,7 @@ func printPacketInfo(ifi *net.Interface, packet gopacket.Packet, tlvid int) bool
 	if ethernetLayer != nil {
 		ethernetPacket, _ := ethernetLayer.(*layers.Ethernet)
 		if ethernetPacket.EthernetType == layers.EthernetTypeLinkLayerDiscovery{
-			if err := saveCache(device, packet); err !=nil {
+			if err := saveCache(ifi.Name, packet); err !=nil {
 				log.Warningf("save package file failed. err: %v", err)
 			}
 			log.Debug("Ethernet layer detected.")
@@ -373,3 +377,26 @@ func saveCache(device string, packet gopacket.Packet) error {
 
 	return r.WritePacket(packet.Metadata().CaptureInfo, packet.Data())
 }
+
+
+
+func waitForNetwork() {
+	for true {
+		// wait one second
+		t := time.NewTimer(time.Second)
+		<-t.C
+
+		cmd := exec.Command("ping", "127.0.0.1", "-c", "1", "-W", "5")
+		err := cmd.Run()
+		if err != nil {
+			//log.Error(err.Error())
+			continue
+		} else {
+			log.Debug("Net Status , OK")
+			break
+		}
+	}
+}
+
+
+
