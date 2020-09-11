@@ -145,13 +145,19 @@ func getLLDPInfo(ifi *net.Interface) error {
 
 	//start := time.Now()
 	// Open device
+	log.Debugf("OpenLive device:%v snaplen:%v promisc:%v", ifi.Name, int32(ifi.MTU), promiscuous)
 	handle, err = pcap.OpenLive(ifi.Name, int32(ifi.MTU), promiscuous, 50 * time.Millisecond)
 	if err != nil {
 		log.Debugf("OpenLive oerr: %v", err)
 		return fmt.Errorf("open live %v interface failed", ifi.Name)
 	}
 	defer handle.Close()
+
 	go exit_timeout(timeout, handle)
+
+	if err := handle.SetBPFFilter("ether proto 0x88cc"); err != nil {
+		return err
+	}
 
 	packetSource := gopacket.NewPacketSource(handle, handle.LinkType())
 	for packet := range packetSource.Packets() {
@@ -286,7 +292,8 @@ func printPacketInfo(ifi *net.Interface, packet gopacket.Packet, tlvid int) bool
 	ethernetLayer := packet.Layer(layers.LayerTypeEthernet)
 	if ethernetLayer != nil {
 		ethernetPacket, _ := ethernetLayer.(*layers.Ethernet)
-		if ethernetPacket.EthernetType == layers.EthernetTypeLinkLayerDiscovery{
+		if ethernetPacket.EthernetType == layers.EthernetTypeLinkLayerDiscovery &&
+			ethernetPacket.SrcMAC.String() != ifi.HardwareAddr.String(){
 			if err := saveCache(ifi.Name, packet); err !=nil {
 				log.Warningf("save package file failed. err: %v", err)
 			}
@@ -302,6 +309,8 @@ func printPacketInfo(ifi *net.Interface, packet gopacket.Packet, tlvid int) bool
 	// Check for errors
 	if err := packet.ErrorLayer(); err != nil {
 		log.Debugf("Error decoding some part of the packet: %v", err)
+
+		saveCachePacket(fmt.Sprintf("%vErr.pcap", ifi.Name), packet)
 	}
 
 	return res
@@ -358,6 +367,28 @@ func printPacketInfoFromCache(ifi *net.Interface, tlvid int) bool {
 func saveCache(device string, packet gopacket.Packet) error {
 	cachepath := fmt.Sprintf(cachepathformat, device)
 	f, err := os.Create(cachepath)
+	if err != nil {
+		log.Debugf("os create err: %v", err)
+		return  err
+	}
+	defer f.Close()
+	r := pcapgo.NewWriter(f)
+	if err != nil {
+		log.Debugf("NewNgWriter err: %v", err)
+		return err
+	}
+
+	if err := r.WriteFileHeader(1600, layers.LinkTypeEthernet); err != nil {
+		log.Debugf("WriteFileHeader: %v", err)
+		return err
+	}
+
+
+	return r.WritePacket(packet.Metadata().CaptureInfo, packet.Data())
+}
+
+func saveCachePacket(name string, packet gopacket.Packet) error {
+	f, err := os.Create(name)
 	if err != nil {
 		log.Debugf("os create err: %v", err)
 		return  err
