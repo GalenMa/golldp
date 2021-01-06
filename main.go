@@ -233,8 +233,9 @@ func readLinkLayerDiscoverypacket(ifi *net.Interface, packet gopacket.Packet, tl
 	discoveryInfoPacket, _ := discoveryInfoLayer.(*layers.LinkLayerDiscoveryInfo)
 	//log.Debugf("discoveryInfoPacket: %v", discoveryInfoPacket)
 
-	if ifi.HardwareAddr.String() == net.HardwareAddr(discoveryPacket.ChassisID.ID).String(){
-		log.Debug("local lldp packet")
+	if discoveryPacket.ChassisID.Subtype != layers.LLDPChassisIDSubtypeIfaceName ||
+		ifi.HardwareAddr.String() == net.HardwareAddr(discoveryPacket.ChassisID.ID).String(){
+		log.Debug("invalid network lldp packet")
 		return false
 	}
 
@@ -294,15 +295,18 @@ func printPacketInfo(ifi *net.Interface, packet gopacket.Packet, tlvid int) bool
 		ethernetPacket, _ := ethernetLayer.(*layers.Ethernet)
 		if ethernetPacket.EthernetType == layers.EthernetTypeLinkLayerDiscovery &&
 			ethernetPacket.SrcMAC.String() != ifi.HardwareAddr.String(){
-			if err := saveCache(ifi.Name, packet); err !=nil {
-				log.Warningf("save package file failed. err: %v", err)
-			}
+
 			log.Debug("Ethernet layer detected.")
 			log.Debug("Source MAC: ", ethernetPacket.SrcMAC)
 			log.Debug("Destination MAC: ", ethernetPacket.DstMAC)
 			// Ethernet type is typically IPv4 but could be ARP or other
 			log.Debug("Ethernet type: ", ethernetPacket.EthernetType)
-			return readLinkLayerDiscoverypacket(ifi, packet, tlvid)
+			if readLinkLayerDiscoverypacket(ifi, packet, tlvid) {
+				if err := saveCache(ifi.Name, packet); err !=nil {
+					log.Warningf("save package file failed. err: %v", err)
+				}
+			}
+
 		}
 	}
 
