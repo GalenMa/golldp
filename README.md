@@ -1,2 +1,2 @@
 # golldptool
-get lldp info without server
+get lldp info by lldp network packages
